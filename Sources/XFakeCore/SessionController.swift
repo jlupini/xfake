@@ -83,7 +83,11 @@ public final class SessionController {
 
     private func process(_ event: DisplayEvent) {
         let before = state
-        defer { xfakeTrace("process event=\(event) state=\(before) -> \(state)") }
+        defer {
+            if before != state || !event.isPeriodic {
+                xfakeTrace("process event=\(event) state=\(before) -> \(state)")
+            }
+        }
         switch event {
         case .glassesAppeared(let info):
             let sessionActive = virtualHandle != nil
@@ -145,7 +149,7 @@ public final class SessionController {
             // mirrored, NSScreen omits the mirrored display and the name can
             // fall back to "Display N", which would change the serial across
             // mode toggles and weaken macOS's arrangement persistence.
-            serialNum: Self.stableSerial(for: "\(g.vendorID):\(g.productID)"),
+            serialNum: xfakeStableSerial(for: "\(g.vendorID):\(g.productID)"),
             sizeInMM: CGSize(width: 600, height: 600.0 * Double(aspect.h) / Double(aspect.w)),
             modes: ladder
         )
@@ -245,12 +249,5 @@ public final class SessionController {
     private func setState(_ new: SessionState) {
         state = new
         onStateChange?(new)
-    }
-
-    static func stableSerial(for name: String) -> UInt32 {
-        // djb2 — stable across launches so macOS remembers the display
-        var hash: UInt32 = 5381
-        for byte in name.utf8 { hash = hash &* 33 &+ UInt32(byte) }
-        return hash
     }
 }

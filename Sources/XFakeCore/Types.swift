@@ -63,6 +63,17 @@ public enum DisplayEvent: Equatable {
     case mirrorPreferencesChanged
 }
 
+extension DisplayEvent {
+    /// Re-emitted by every watcher scan, so worth tracing only when something
+    /// actually changes — otherwise they bury the interesting lines.
+    var isPeriodic: Bool {
+        switch self {
+        case .virtualOnline, .reconfigured: return true
+        default: return false
+        }
+    }
+}
+
 public enum SessionState: Equatable {
     case idle
     case glassesPresent           // glasses connected but app disabled

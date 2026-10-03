@@ -18,6 +18,7 @@ public final class GlassesWatcher {
     private var knownGlasses: GlassesInfo?
     private var ownVirtualID: () -> CGDirectDisplayID?
     private var pendingScan: DispatchWorkItem?
+    private var lastScanSignature = ""
     private var pollTimer: DispatchSourceTimer?
 
     /// ownVirtualID lets the watcher recognize the SessionController's own
@@ -75,17 +76,25 @@ public final class GlassesWatcher {
     private func scan(source: String) {
         let online = onlineDisplayIDs()
         let virtualID = ownVirtualID()
-        xfakeTrace("scan source=\(source) online=\(online) virtualID=\(virtualID.map(String.init) ?? "nil")")
+        // Once per second forever, so trace only when the picture changes.
+        let signature = "\(online) \(virtualID.map(String.init) ?? "nil")"
+        if signature != lastScanSignature {
+            lastScanSignature = signature
+            xfakeTrace("scan source=\(source) online=\(online) virtualID=\(virtualID.map(String.init) ?? "nil")")
+        }
 
         if let virtualID, online.contains(virtualID) {
-            xfakeTrace("event: .virtualOnline(\(virtualID))")
             onEvent?(.virtualOnline(virtualID))
         }
 
-        // The virtual display deliberately copies the glasses' vendorID (so
-        // macOS persists arrangement), so it must be excluded here or the
-        // watcher would match xfake's own virtual display as the glasses.
-        let found = online.first { $0 != virtualID && vendorIDs.contains(CGDisplayVendorNumber($0)) }
+        let candidates = online.map { id in
+            DisplayInfo(id: id, name: "", vendorID: CGDisplayVendorNumber(id),
+                        productID: CGDisplayModelNumber(id),
+                        serialNumber: CGDisplaySerialNumber(id),
+                        isBuiltin: CGDisplayIsBuiltin(id) == 1)
+        }
+        let found = selectGlassesDisplay(from: candidates, vendorIDs: vendorIDs,
+                                         liveVirtualID: virtualID)?.id
         switch (knownGlasses, found) {
         case (nil, .some(let id)):
             if let info = glassesInfo(id) {
@@ -114,11 +123,9 @@ public final class GlassesWatcher {
                     xfakeTrace("event: .glassesModeChanged(\(info))")
                     onEvent?(.glassesModeChanged(info))
                 } else {
-                    xfakeTrace("event: .reconfigured")
                     onEvent?(.reconfigured)
                 }
             } else {
-                xfakeTrace("event: .reconfigured")
                 onEvent?(.reconfigured)
             }
         case (nil, nil):
