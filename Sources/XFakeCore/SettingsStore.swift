@@ -3,8 +3,12 @@ import Foundation
 public final class SettingsStore {
     private enum Keys {
         static let enabled = "xfake.enabled"
+        static let autoMirror = "xfake.autoMirror"
         static func preferredMode(for aspect: AspectRatio) -> String {
             "preferred.\(aspect.w)x\(aspect.h)"
+        }
+        static func mirrors(_ display: DisplayInfo) -> String {
+            "mirror.\(display.persistentKey)"
         }
     }
 
@@ -22,6 +26,24 @@ public final class SettingsStore {
     public var isEnabled: Bool {
         get { defaults.object(forKey: Keys.enabled) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Keys.enabled) }
+    }
+
+    /// Whether a session automatically puts the configured displays into the
+    /// virtual display's mirror set. Off leaves the topology untouched on
+    /// connect; the per-display toggles still apply on demand.
+    public var autoMirror: Bool {
+        get { defaults.object(forKey: Keys.autoMirror) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Keys.autoMirror) }
+    }
+
+    /// Whether this display should mirror the virtual display, falling back to
+    /// the per-display default when the user has never said.
+    public func mirrorsVirtual(_ display: DisplayInfo) -> Bool {
+        defaults.object(forKey: Keys.mirrors(display)) as? Bool ?? display.mirrorsByDefault
+    }
+
+    public func setMirrorsVirtual(_ on: Bool, for display: DisplayInfo) {
+        defaults.set(on, forKey: Keys.mirrors(display))
     }
 
     public func preferredMode(for aspect: AspectRatio) -> ModeSpec? {

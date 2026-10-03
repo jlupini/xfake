@@ -7,6 +7,7 @@ import XFakeCore
 final class AppModel: ObservableObject {
     @Published var state: SessionState = .idle
     @Published var isEnabled: Bool
+    @Published var autoMirror: Bool
     @Published var launchAtLogin: Bool
 
     let controller: SessionController
@@ -18,6 +19,7 @@ final class AppModel: ObservableObject {
         let settings = SettingsStore()
         self.settings = settings
         self.isEnabled = settings.isEnabled
+        self.autoMirror = settings.autoMirror
         self.launchAtLogin = SMAppService.mainApp.status == .enabled
         let displaySystem = RealDisplaySystem()
         self.displaySystem = displaySystem
@@ -46,7 +48,10 @@ final class AppModel: ObservableObject {
         case .idle: return "Glasses not connected"
         case .glassesPresent: return "Glasses connected (xfake off)"
         case .virtualCreating: return "Creating virtual display…"
-        case .mirrored: return "Mirrored · \(currentModeDescription)"
+        case .mirrored:
+            let count = controller.activeMirrorIDs.count
+            guard count > 0 else { return "Virtual display active · not mirrored" }
+            return "Mirrored to \(count) display\(count == 1 ? "" : "s") · \(currentModeDescription)"
         case .error(let message): return "Error: \(message)"
         }
     }
@@ -85,6 +90,23 @@ final class AppModel: ObservableObject {
             settings.setPreferredMode(mode, for: AspectRatio(of: glasses.native))
             objectWillChange.send()
         }
+    }
+
+    /// Displays that can join the virtual display's mirror set. Re-read on
+    /// each menu open rather than cached, so hotplugs show up without the menu
+    /// needing its own display-watching.
+    var mirrorableDisplays: [DisplayInfo] { controller.mirrorableDisplays }
+
+    func isMirroring(_ display: DisplayInfo) -> Bool { controller.isMirroring(display) }
+
+    func setMirroring(_ on: Bool, for display: DisplayInfo) {
+        controller.setMirroring(on, for: display)
+        objectWillChange.send()
+    }
+
+    func setAutoMirror(_ on: Bool) {
+        autoMirror = on
+        controller.setAutoMirror(on)
     }
 
     func setEnabled(_ enabled: Bool) {
@@ -130,8 +152,20 @@ struct StatusMenu: View {
                 Divider()
                 Button("More sizes in System Settings › Displays") {}.disabled(true)
             }
+            Section("Mirror the virtual display to") {
+                ForEach(model.mirrorableDisplays) { display in
+                    Toggle(display.name, isOn: Binding(
+                        get: { model.isMirroring(display) },
+                        set: { model.setMirroring($0, for: display) }
+                    ))
+                }
+            }
         }
         Divider()
+        Toggle("Auto-mirror when glasses connect", isOn: Binding(
+            get: { model.autoMirror },
+            set: { model.setAutoMirror($0) }
+        ))
         Toggle("Launch at Login", isOn: Binding(
             get: { model.launchAtLogin },
             set: { model.setLaunchAtLogin($0) }

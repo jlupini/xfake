@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import CGVirtualDisplayBridge
 import os.log
@@ -57,23 +58,59 @@ public final class RealDisplaySystem: DisplaySystem {
         return RealVirtualHandle(display)
     }
 
-    public func mirrorAndSetMain(master: CGDirectDisplayID, mirror: CGDirectDisplayID) -> Bool {
+    public func onlineDisplays() -> [DisplayInfo] {
+        // NSScreen omits displays that are mirroring another one, so a display
+        // already in a mirror set has no localizedName to offer. Fall back to
+        // something stable and recognizable rather than an empty row.
+        var names: [CGDirectDisplayID: String] = [:]
+        for screen in NSScreen.screens {
+            if let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID {
+                names[id] = screen.localizedName
+            }
+        }
+        return onlineDisplayIDs().map { id in
+            let isBuiltin = CGDisplayIsBuiltin(id) == 1
+            return DisplayInfo(
+                id: id,
+                name: names[id] ?? (isBuiltin ? "Built-in Display" : "Display \(id)"),
+                vendorID: CGDisplayVendorNumber(id),
+                productID: CGDisplayModelNumber(id),
+                serialNumber: CGDisplaySerialNumber(id),
+                isBuiltin: isBuiltin
+            )
+        }
+    }
+
+    public func applyMirrorTopology(master: CGDirectDisplayID, mirrors: [CGDirectDisplayID]) -> Bool {
         var config: CGDisplayConfigRef?
         let begin = CGBeginDisplayConfiguration(&config)
         guard begin == .success else {
-            Self.log.error("mirrorAndSetMain: CGBeginDisplayConfiguration failed (\(begin.rawValue))")
+            Self.log.error("applyMirrorTopology: CGBeginDisplayConfiguration failed (\(begin.rawValue))")
             return false
         }
-        let mirrorErr = CGConfigureDisplayMirrorOfDisplay(config, mirror, master)
+        let wanted = Set(mirrors)
+        for display in onlineDisplayIDs() where display != master {
+            // Only release displays this mirror set owns: a mirror set the user
+            // built between two other displays is none of our business.
+            let isOurs = CGDisplayMirrorsDisplay(display) == master
+            guard wanted.contains(display) || isOurs else { continue }
+            let target = wanted.contains(display) ? master : kCGNullDirectDisplay
+            let err = CGConfigureDisplayMirrorOfDisplay(config, display, target)
+            guard err == .success else {
+                Self.log.error("applyMirrorTopology: mirror \(display) -> \(target) failed (\(err.rawValue))")
+                CGCancelDisplayConfiguration(config)
+                return false
+            }
+        }
         let originErr = CGConfigureDisplayOrigin(config, master, 0, 0)
-        guard mirrorErr == .success, originErr == .success else {
-            Self.log.error("mirrorAndSetMain: configure failed (mirror=\(mirrorErr.rawValue) origin=\(originErr.rawValue))")
+        guard originErr == .success else {
+            Self.log.error("applyMirrorTopology: CGConfigureDisplayOrigin failed (\(originErr.rawValue))")
             CGCancelDisplayConfiguration(config)
             return false
         }
         let complete = CGCompleteDisplayConfiguration(config, Self.scope)
         guard complete == .success else {
-            Self.log.error("mirrorAndSetMain: CGCompleteDisplayConfiguration failed (\(complete.rawValue))")
+            Self.log.error("applyMirrorTopology: CGCompleteDisplayConfiguration failed (\(complete.rawValue))")
             return false
         }
         return true
@@ -158,8 +195,9 @@ public final class RealDisplaySystem: DisplaySystem {
         return ModeSpec(width: mode.width, height: mode.height, refresh: mode.refreshRate)
     }
 
-    public func isMirrored(_ display: CGDirectDisplayID) -> Bool {
-        CGDisplayMirrorsDisplay(display) != kCGNullDirectDisplay
+    public func mirrorSource(of display: CGDirectDisplayID) -> CGDirectDisplayID? {
+        let source = CGDisplayMirrorsDisplay(display)
+        return source == kCGNullDirectDisplay ? nil : source
     }
 
     public func builtinDisplayID() -> CGDirectDisplayID? {

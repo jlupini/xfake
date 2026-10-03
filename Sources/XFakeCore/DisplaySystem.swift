@@ -28,9 +28,18 @@ public protocol DisplaySystem: AnyObject {
     /// onTermination receives the terminated display's ID so stale callbacks
     /// from an already-replaced virtual display can be ignored.
     func createVirtualDisplay(_ config: VirtualDisplayConfig, onTermination: @escaping (CGDirectDisplayID) -> Void) -> VirtualHandle?
-    /// Mirrors `mirror` onto `master` AND makes `master` the main display in a
-    /// single WindowServer transaction (no intermediate flicker state).
-    func mirrorAndSetMain(master: CGDirectDisplayID, mirror: CGDirectDisplayID) -> Bool
+    /// Identity and role of every online display, for deciding mirror-set
+    /// membership and listing displays in the UI.
+    func onlineDisplays() -> [DisplayInfo]
+    /// Declares the whole topology in one WindowServer transaction: `master`
+    /// becomes the main display, every display in `mirrors` joins its mirror
+    /// set, and any display that was mirroring `master` but is no longer
+    /// wanted is released. Mirror sets between other displays are left alone.
+    ///
+    /// Declarative rather than incremental so a settings toggle, a session
+    /// start and a post-wake repair all run the same single code path and
+    /// converge on the same end state.
+    func applyMirrorTopology(master: CGDirectDisplayID, mirrors: [CGDirectDisplayID]) -> Bool
     func unmirror(_ display: CGDirectDisplayID) -> Bool
     func setMain(_ display: CGDirectDisplayID) -> Bool
     func applyMode(_ display: CGDirectDisplayID, mode: ModeSpec) -> Bool
@@ -39,7 +48,10 @@ public protocol DisplaySystem: AnyObject {
     /// xfake (e.g. via System Settings) so xfake can adopt them instead of
     /// overriding them with a stale stored preference.
     func currentMode(of display: CGDirectDisplayID) -> ModeSpec?
-    func isMirrored(_ display: CGDirectDisplayID) -> Bool
+    /// The display this one is mirroring, or nil if it is independent. More
+    /// precise than a bare "is mirrored" flag: xfake must distinguish displays
+    /// in ITS mirror set from ones in a set the user built themselves.
+    func mirrorSource(of display: CGDirectDisplayID) -> CGDirectDisplayID?
     func builtinDisplayID() -> CGDirectDisplayID?
     func isOnline(_ display: CGDirectDisplayID) -> Bool
     /// Un-mirrors every currently online display and makes `mainDisplay` the

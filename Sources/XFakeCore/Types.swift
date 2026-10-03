@@ -58,6 +58,9 @@ public enum DisplayEvent: Equatable {
     case virtualTerminated(CGDirectDisplayID)
     case reconfigured
     case enabledChanged(Bool)
+    /// The user changed which displays should mirror the virtual display (or
+    /// toggled auto-mirroring), so the topology needs re-applying.
+    case mirrorPreferencesChanged
 }
 
 public enum SessionState: Equatable {
@@ -66,4 +69,39 @@ public enum SessionState: Equatable {
     case virtualCreating
     case mirrored(virtual: CGDirectDisplayID, glasses: CGDirectDisplayID)
     case error(String)
+}
+
+/// Identity and role of an online display, used to decide and display
+/// mirror-set membership.
+public struct DisplayInfo: Equatable, Hashable, Identifiable {
+    public let id: CGDirectDisplayID
+    public let name: String
+    public let vendorID: UInt32
+    public let productID: UInt32
+    public let serialNumber: UInt32
+    public let isBuiltin: Bool
+
+    public init(id: CGDirectDisplayID, name: String, vendorID: UInt32, productID: UInt32,
+                serialNumber: UInt32, isBuiltin: Bool) {
+        self.id = id
+        self.name = name
+        self.vendorID = vendorID
+        self.productID = productID
+        self.serialNumber = serialNumber
+        self.isBuiltin = isBuiltin
+    }
+
+    /// Stable across reconnects — display IDs are not — so a display's mirror
+    /// preference survives unplugging it.
+    public var persistentKey: String { "\(vendorID):\(productID):\(serialNumber)" }
+
+    public var isGlasses: Bool { xrealVendorIDs.contains(vendorID) }
+
+    /// Whether this display joins the virtual display's mirror set when the
+    /// user has expressed no preference. The glasses must mirror it or the
+    /// virtual desktop is invisible; the built-in panel mirrors so windows
+    /// can't strand themselves on a screen the wearer isn't looking at. Other
+    /// externals stay independent — a desk monitor is usually its own
+    /// workspace, not a second view of the glasses.
+    public var mirrorsByDefault: Bool { isGlasses || isBuiltin }
 }

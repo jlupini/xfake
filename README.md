@@ -48,6 +48,28 @@ callbacks are actually being delivered, what the watcher's periodic poll
 sees, and exactly which event drove (or failed to drive) each state
 transition.
 
+## Mirroring
+
+When the glasses connect, xfake makes the virtual display the **main** display
+and puts the glasses *and* the built-in panel into its mirror set, so there is
+one desktop rather than a spare screen windows can strand themselves on. Other
+external monitors stay independent by default — a desk monitor is usually its
+own workspace — but any display can be toggled either way from the menu bar:
+
+    Mirror the virtual display to
+      ✓ XREAL One Pro
+      ✓ Built-in Display
+        DELL U3223QE
+
+Those choices are remembered per display (keyed by its identity, not its
+display ID, so they survive unplugging), and xfake re-applies the whole
+topology in a single WindowServer transaction whenever it drifts — after sleep,
+a hotplug, or macOS rearranging things on its own.
+
+**Auto-mirror when glasses connect** turns the automatic part off. The virtual
+display is still created, but the topology is left alone until you flip one of
+the per-display toggles yourself.
+
 ## How it works
 
 The glasses' panel is a fixed size (1920×1080, 2560×1080 or 3840×1080

@@ -30,6 +30,48 @@ public final class SessionController {
     public var currentGlasses: GlassesInfo? { glasses }
     public var virtualDisplayID: CGDirectDisplayID? { virtualHandle?.displayID }
 
+    /// Every online display that could mirror the virtual one — i.e. all of
+    /// them except the virtual display itself.
+    public var mirrorableDisplays: [DisplayInfo] {
+        guard let v = virtualHandle?.displayID else { return [] }
+        return system.onlineDisplays().filter { $0.id != v }.map(namingGlasses)
+    }
+
+    /// A display in a mirror set is dropped from NSScreen, so its name decays
+    /// to "Display N". The watcher captured the real one before mirroring, so
+    /// prefer that.
+    private func namingGlasses(_ info: DisplayInfo) -> DisplayInfo {
+        guard let g = glasses, g.displayID == info.id, !g.name.isEmpty else { return info }
+        return DisplayInfo(id: info.id, name: g.name, vendorID: info.vendorID,
+                           productID: info.productID, serialNumber: info.serialNumber,
+                           isBuiltin: info.isBuiltin)
+    }
+
+    private var desiredMirrorIDs: [CGDirectDisplayID] {
+        mirrorableDisplays.filter { settings.mirrorsVirtual($0) }.map(\.id)
+    }
+
+    /// Displays currently mirroring the virtual display, for showing real
+    /// state in the UI rather than just the stored intent.
+    public var activeMirrorIDs: Set<CGDirectDisplayID> {
+        guard let v = virtualHandle?.displayID else { return [] }
+        return Set(system.onlineDisplays().map(\.id).filter { system.mirrorSource(of: $0) == v })
+    }
+
+    public func isMirroring(_ display: DisplayInfo) -> Bool { settings.mirrorsVirtual(display) }
+
+    public func setMirroring(_ on: Bool, for display: DisplayInfo) {
+        settings.setMirrorsVirtual(on, for: display)
+        handle(.mirrorPreferencesChanged)
+    }
+
+    public var isAutoMirrorEnabled: Bool { settings.autoMirror }
+
+    public func setAutoMirror(_ on: Bool) {
+        settings.autoMirror = on
+        if on { handle(.mirrorPreferencesChanged) }
+    }
+
     public func handle(_ event: DisplayEvent) {
         dispatchPrecondition(condition: .onQueue(.main))
         pendingEvents.append(event)
@@ -69,6 +111,8 @@ public final class SessionController {
         case .reconfigured:
             repairIfNeeded()
             adoptExternalModeChangeIfNeeded()
+        case .mirrorPreferencesChanged:
+            applyMirrorPreferences()
         case .enabledChanged(let enabled):
             if enabled, glasses != nil, canStartSession(from: state) {
                 beginSession()
@@ -120,9 +164,13 @@ public final class SessionController {
 
     private func completeSession() {
         guard let g = glasses, let v = virtualHandle else { return }
-        guard system.mirrorAndSetMain(master: v.displayID, mirror: g.displayID) else {
-            teardown(to: .error("mirror configuration failed"))
-            return
+        // Auto-mirror off means the user drives the mirror set by hand from the
+        // menu, so leave the topology (and the main display) untouched here.
+        if settings.autoMirror {
+            guard system.applyMirrorTopology(master: v.displayID, mirrors: desiredMirrorIDs) else {
+                teardown(to: .error("mirror configuration failed"))
+                return
+            }
         }
         // No stored preference -> native, the sharpest possible mode. Without
         // this, first run stays at whatever macOS picked when creating the
@@ -137,9 +185,11 @@ public final class SessionController {
     private func teardown(to target: SessionState) {
         // No live virtual display -> xfake owns no WindowServer state; never
         // touch mirroring or the main display in that case.
-        guard virtualHandle != nil else { setState(target); return }
-        if let g = glasses, system.isMirrored(g.displayID) {
-            _ = system.unmirror(g.displayID) // always un-mirror BEFORE releasing the virtual
+        guard let v = virtualHandle?.displayID else { setState(target); return }
+        // Always release our whole mirror set BEFORE destroying the master,
+        // or WindowServer is left holding a set whose source is gone.
+        for display in system.onlineDisplays() where display.id != v && system.mirrorSource(of: display.id) == v {
+            _ = system.unmirror(display.id)
         }
         virtualHandle = nil // releases XFVirtualDisplay -> WindowServer removes the display
         if let builtin = system.builtinDisplayID(), !system.setMain(builtin) {
@@ -148,13 +198,27 @@ public final class SessionController {
         setState(target)
     }
 
+    /// Reconciles the actual mirror set against the desired one — after wake,
+    /// after a hotplug, or any time macOS rearranges displays out from under
+    /// us. Driven by the desired set rather than a remembered display ID, so a
+    /// display that has gone away simply drops out instead of wedging repair.
     private func repairIfNeeded() {
-        guard case .mirrored(let v, let g) = state else { return }
-        guard system.isOnline(v), system.isOnline(g) else { return }
-        if !system.isMirrored(g) {
-            if !system.mirrorAndSetMain(master: v, mirror: g) {
-                Self.log.error("repair: failed to re-mirror \(g) onto \(v)")
-            }
+        guard case .mirrored(let v, _) = state, settings.autoMirror else { return }
+        guard system.isOnline(v) else { return }
+        let desired = Set(desiredMirrorIDs)
+        let actual = Set(system.onlineDisplays().map(\.id).filter { system.mirrorSource(of: $0) == v })
+        guard desired != actual else { return }
+        if !system.applyMirrorTopology(master: v, mirrors: Array(desired)) {
+            Self.log.error("repair: failed to restore mirror topology on \(v)")
+        }
+    }
+
+    /// Re-applies the topology after the user changes a mirror toggle. Runs
+    /// even when auto-mirroring is off: the toggle IS the explicit instruction.
+    private func applyMirrorPreferences() {
+        guard case .mirrored(let v, _) = state else { return }
+        if !system.applyMirrorTopology(master: v, mirrors: desiredMirrorIDs) {
+            Self.log.error("mirror preferences: failed to apply topology on \(v)")
         }
     }
 

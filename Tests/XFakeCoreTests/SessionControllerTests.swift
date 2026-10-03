@@ -12,16 +12,28 @@ final class MockDisplaySystem: DisplaySystem {
     var terminations: [(CGDirectDisplayID) -> Void] = []
     var failCreates = 0
     var nextVirtualID: CGDirectDisplayID = 100
-    var mirrors: [(master: CGDirectDisplayID, mirror: CGDirectDisplayID)] = []
+    var topologies: [(master: CGDirectDisplayID, mirrors: Set<CGDirectDisplayID>)] = []
     var unmirrors: [CGDirectDisplayID] = []
     var mains: [CGDirectDisplayID] = []
     var appliedModes: [(CGDirectDisplayID, ModeSpec)] = []
-    var mirroredIDs: Set<CGDirectDisplayID> = []
+    /// display -> the display it mirrors.
+    var mirrorSources: [CGDirectDisplayID: CGDirectDisplayID] = [:]
+    /// Physical displays the mock reports as online. Defaults to a glasses
+    /// display (id 5, XREAL vendor) plus a built-in panel (id 1).
+    var displays: [DisplayInfo] = [
+        DisplayInfo(id: 5, name: "XREAL One Pro", vendorID: 13895, productID: 16640,
+                    serialNumber: 0, isBuiltin: false),
+        DisplayInfo(id: 1, name: "Built-in Display", vendorID: 1552, productID: 41039,
+                    serialNumber: 4251086178, isBuiltin: true),
+    ]
     var builtin: CGDirectDisplayID? = 1
     var mirrorResult = true
     var isOnlineResult = true
     var onUnmirror: (() -> Void)?
     var currentModeResult: ModeSpec?
+    /// Set by tests to the id the controller is currently holding, so
+    /// onlineDisplays() can include the virtual display like the real system.
+    var virtualDisplayID: CGDirectDisplayID?
     var resetTopologyCalls: [CGDirectDisplayID] = []
     var resetTopologyResult = true
 
@@ -31,15 +43,32 @@ final class MockDisplaySystem: DisplaySystem {
         if failCreates > 0 { failCreates -= 1; return nil }
         let id = nextVirtualID
         nextVirtualID += 1
+        virtualDisplayID = id
         return MockHandle(id)
     }
-    func mirrorAndSetMain(master: CGDirectDisplayID, mirror: CGDirectDisplayID) -> Bool {
+    func onlineDisplays() -> [DisplayInfo] {
+        // The live virtual display is online too, and SessionController must
+        // filter it out of the mirrorable set itself.
+        var all = displays
+        if let virtual = virtualDisplayID {
+            all.append(DisplayInfo(id: virtual, name: "Virtual", vendorID: 13895,
+                                   productID: 16640, serialNumber: 999, isBuiltin: false))
+        }
+        return all
+    }
+
+    func applyMirrorTopology(master: CGDirectDisplayID, mirrors: [CGDirectDisplayID]) -> Bool {
         guard mirrorResult else { return false }
-        mirrors.append((master, mirror)); mirroredIDs.insert(mirror); mains.append(master)
+        topologies.append((master, Set(mirrors)))
+        for (display, source) in mirrorSources where source == master {
+            mirrorSources[display] = nil
+        }
+        for display in mirrors { mirrorSources[display] = master }
+        mains.append(master)
         return true
     }
     func unmirror(_ display: CGDirectDisplayID) -> Bool {
-        unmirrors.append(display); mirroredIDs.remove(display)
+        unmirrors.append(display); mirrorSources[display] = nil
         onUnmirror?()
         return true
     }
@@ -48,7 +77,7 @@ final class MockDisplaySystem: DisplaySystem {
         appliedModes.append((display, mode)); return true
     }
     func currentMode(of display: CGDirectDisplayID) -> ModeSpec? { currentModeResult }
-    func isMirrored(_ display: CGDirectDisplayID) -> Bool { mirroredIDs.contains(display) }
+    func mirrorSource(of display: CGDirectDisplayID) -> CGDirectDisplayID? { mirrorSources[display] }
     func builtinDisplayID() -> CGDirectDisplayID? { builtin }
     func isOnline(_ display: CGDirectDisplayID) -> Bool { isOnlineResult }
     func resetTopology(mainDisplay: CGDirectDisplayID) -> Bool {
@@ -95,8 +124,8 @@ final class SessionControllerTests: XCTestCase {
         controller.handle(.glassesAppeared(glasses))
         controller.handle(.virtualOnline(100))
         XCTAssertEqual(controller.state, .mirrored(virtual: 100, glasses: 5))
-        XCTAssertEqual(system.mirrors.first?.master, 100)
-        XCTAssertEqual(system.mirrors.first?.mirror, 5)
+        XCTAssertEqual(system.topologies.first?.master, 100)
+        XCTAssertEqual(system.topologies.first?.mirrors, [5, 1], "glasses and built-in both mirror by default")
         XCTAssertEqual(system.mains, [100])
         XCTAssertEqual(system.appliedModes.first?.1, ModeSpec(width: 4160, height: 1170, refresh: 60))
     }
@@ -105,7 +134,7 @@ final class SessionControllerTests: XCTestCase {
         controller.handle(.glassesAppeared(glasses))
         controller.handle(.virtualOnline(999))
         XCTAssertEqual(controller.state, .virtualCreating)
-        XCTAssertTrue(system.mirrors.isEmpty)
+        XCTAssertTrue(system.topologies.isEmpty)
     }
 
     func testDisappearTearsDownAndRestoresBuiltinMain() {
@@ -113,7 +142,7 @@ final class SessionControllerTests: XCTestCase {
         controller.handle(.virtualOnline(100))
         controller.handle(.glassesDisappeared(5))
         XCTAssertEqual(controller.state, .idle)
-        XCTAssertEqual(system.unmirrors, [5])
+        XCTAssertEqual(system.unmirrors, [5, 1], "teardown releases every display in our mirror set")
         XCTAssertEqual(system.mains.last, 1) // builtin
     }
 
@@ -145,7 +174,7 @@ final class SessionControllerTests: XCTestCase {
         settings.isEnabled = false
         controller.handle(.enabledChanged(false))
         XCTAssertEqual(controller.state, .glassesPresent)
-        XCTAssertEqual(system.unmirrors, [5])
+        XCTAssertEqual(system.unmirrors, [5, 1])
     }
 
     func testModeChangeRebuildsVirtualAtNewAspect() {
@@ -156,7 +185,7 @@ final class SessionControllerTests: XCTestCase {
                                       native: ModeSpec(width: 1920, height: 1080, refresh: 120))
         system.nextVirtualID = 101
         controller.handle(.glassesModeChanged(sixteenNine))
-        XCTAssertEqual(system.unmirrors, [5])
+        XCTAssertEqual(system.unmirrors, [5, 1])
         XCTAssertEqual(system.createdConfigs.count, 2)
         XCTAssertEqual(system.createdConfigs[1].modes.first, sixteenNine.native)
         controller.handle(.virtualOnline(101))
@@ -166,9 +195,10 @@ final class SessionControllerTests: XCTestCase {
     func testRepairReestablishesBrokenMirror() {
         controller.handle(.glassesAppeared(glasses))
         controller.handle(.virtualOnline(100))
-        system.mirroredIDs.removeAll() // simulate wake breaking the mirror set
+        system.mirrorSources.removeAll() // simulate wake breaking the mirror set
         controller.handle(.reconfigured)
-        XCTAssertEqual(system.mirrors.count, 2, "repair should re-mirror")
+        XCTAssertEqual(system.topologies.count, 2, "repair should re-apply the topology")
+        XCTAssertEqual(system.topologies.last?.mirrors, [5, 1])
     }
 
     // MARK: - Review findings (C1, I1-I5, M2, M5, M6)
@@ -189,7 +219,7 @@ final class SessionControllerTests: XCTestCase {
                                 name: "XREAL One Pro",
                                 native: ModeSpec(width: 3840, height: 1080, refresh: 60))
         controller.handle(.glassesAppeared(other))
-        XCTAssertEqual(system.unmirrors, [5], "old session must be torn down first")
+        XCTAssertEqual(system.unmirrors, [5, 1], "old session must be torn down first")
         XCTAssertEqual(system.createdConfigs.count, 2)
         XCTAssertEqual(controller.state, .virtualCreating)
         controller.handle(.virtualOnline(101))
@@ -254,7 +284,7 @@ final class SessionControllerTests: XCTestCase {
         }
         controller.handle(.glassesDisappeared(5))
         XCTAssertEqual(controller.state, .idle, "teardown must run to completion")
-        XCTAssertEqual(system.mirrors.count, 1, "deferred repair must not re-mirror a torn-down session")
+        XCTAssertEqual(system.topologies.count, 1, "deferred repair must not re-mirror a torn-down session")
     }
 
     func testEnabledChangedRecoversFromErrorState() {
@@ -280,11 +310,11 @@ final class SessionControllerTests: XCTestCase {
     func testRepairSkipsReMirrorWhenDisplaysReportOffline() {
         controller.handle(.glassesAppeared(glasses))
         controller.handle(.virtualOnline(100))
-        XCTAssertEqual(system.mirrors.count, 1)
-        system.mirroredIDs.removeAll() // simulate wake breaking the mirror set
+        XCTAssertEqual(system.topologies.count, 1)
+        system.mirrorSources.removeAll() // simulate wake breaking the mirror set
         system.isOnlineResult = false
         controller.handle(.reconfigured)
-        XCTAssertEqual(system.mirrors.count, 1, "isOnline() == false must short-circuit repair before re-mirroring")
+        XCTAssertEqual(system.topologies.count, 1, "isOnline() == false must short-circuit repair before re-mirroring")
     }
 
     // MARK: - Fix 1: apply native by default
